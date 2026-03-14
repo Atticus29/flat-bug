@@ -106,9 +106,15 @@ class TensorPredictions:
         # Timing could probably be hidden in a decorator...
         if self.time and len(predictions) > 0:
             # Initialize timing calculations
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            # Get device from predictions if self.device is not set yet
+            device = self.device if self.device is not None else (predictions[0].device if len(predictions) > 0 else torch.device('cpu'))
+            if device.type == 'cuda':
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+            else:
+                import time
+                start_time = time.perf_counter()
 
         # Allow passing of keyword arguments to set attributes
         for k, v in kwargs.items():
@@ -144,9 +150,16 @@ class TensorPredictions:
             self.masks, self.polygons, self.boxes, self.confs, self.classes, self.scales = torch.empty((0, 0), device=self.device, dtype=self.dtype), [], torch.empty((0, 4), device=self.device, dtype=self.dtype), torch.empty(0, device=self.device, dtype=self.dtype), torch.empty(0, device=self.device, dtype=self.dtype), []
 
         if self.time and len(predictions) > 0:
-            end.record()
-            torch.cuda.synchronize()
-            logger.info(f'Initializing TensorPredictions took {start.elapsed_time(end) / 1000:.3f} s')
+            # Use the same device as in the timing initialization
+            device = self.device if self.device is not None else (predictions[0].device if len(predictions) > 0 else torch.device('cpu'))
+            if device.type == 'cuda':
+                end.record()
+                torch.cuda.synchronize()
+                elapsed_time = start.elapsed_time(end) / 1000
+            else:
+                end_time = time.perf_counter()
+                elapsed_time = end_time - start_time
+            logger.info(f'Initializing TensorPredictions took {elapsed_time:.3f} s')
 
     def _combine_predictions(
             self, 
@@ -161,11 +174,15 @@ class TensorPredictions:
         """
         if self.time:
             # Initialize timing calculations
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            end_duplication_removal = torch.cuda.Event(enable_timing=True)
-            end_mask_combination = torch.cuda.Event(enable_timing=True)
-            start.record()
+            if self.device.type == 'cuda':
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                end_duplication_removal = torch.cuda.Event(enable_timing=True)
+                end_mask_combination = torch.cuda.Event(enable_timing=True)
+                start.record()
+            else:
+                import time
+                start_time = time.perf_counter()
         self.boxes = torch.cat([p.boxes for p in predictions])  # Nx4
         self.confs = torch.cat([p.confs for p in predictions])  # N
         self.scales = [p.scale for p in predictions for _ in range(len(p))]  # N
@@ -187,14 +204,20 @@ class TensorPredictions:
         valid_chunked = [valid_indices[(valid_indices < max_indices[i]) & (valid_indices >= (max_indices[i - 1] if i > 0 else 0))] - (max_indices[i] - n_detections[i]) for i in range(len(predictions))]
 
         if self.time:
-            end_duplication_removal.record()
+            if self.device.type == 'cuda':
+                end_duplication_removal.record()
+            else:
+                duplication_removal_time = time.perf_counter()
 
         # For the remaining attributes we remove the duplicates before combining them
         self.masks = stack_masks([p.masks[nd] for p, nd in zip(predictions, valid_chunked)])  # NxMHxMW - MH and MW are proportional to the original image size
         self.mask_height, self.mask_width = self.masks.shape[1:]
 
         if self.time:
-            end_mask_combination.record()
+            if self.device.type == 'cuda':
+                end_mask_combination.record()
+            else:
+                mask_combination_time = time.perf_counter()
 
         self.masks.orig_shape = self.image.shape[1:]  # Set the target shape of the masks to the shape of the image passed to the TensorPredictions object
 
@@ -217,11 +240,17 @@ class TensorPredictions:
         assert len(self) == len(self.classes), RuntimeError(f"len(self) {len(self)} != len(self.classes) {len(self.classes)}")
         assert len(self) == len(self.scales), RuntimeError(f"len(self) {len(self)} != len(self.scales) {len(self.scales)}")
         if self.time:
-            end.record()
-            torch.cuda.synchronize()
-            total = start.elapsed_time(end) / 1000
-            duplication_removal = start.elapsed_time(end_duplication_removal) / 1000
-            mask_combination = end_duplication_removal.elapsed_time(end_mask_combination) / 1000
+            if self.device.type == 'cuda':
+                end.record()
+                torch.cuda.synchronize()
+                total = start.elapsed_time(end) / 1000
+                duplication_removal = start.elapsed_time(end_duplication_removal) / 1000
+                mask_combination = end_duplication_removal.elapsed_time(end_mask_combination) / 1000
+            else:
+                end_time = time.perf_counter()
+                total = end_time - start_time
+                duplication_removal = duplication_removal_time - start_time
+                mask_combination = mask_combination_time - duplication_removal_time
             logger.info(
                 f'Combining {len(predictions)} predictions into a single TensorPredictions object took {total:.3f} s |'
                 f' Duplication removal: {duplication_removal:.3f} s | Mask combination: {mask_combination:.3f} s'
@@ -248,9 +277,13 @@ class TensorPredictions:
         """
         if self.time:
             # Initialize timing calculations
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            if self.device.type == 'cuda':
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+            else:
+                import time
+                start_time = time.perf_counter()
 
         if any(offset > 0):
             raise NotImplementedError("Positive offsets are not implemented yet")
@@ -292,9 +325,14 @@ class TensorPredictions:
             ]  # Slice out the padded parts of the masks
 
         if self.time:
-            end.record()
-            torch.cuda.synchronize()
-            logger.info(f'Offsetting, scaling and padding took {start.elapsed_time(end) / 1000:.3f} s')
+            if self.device.type == 'cuda':
+                end.record()
+                torch.cuda.synchronize()
+                elapsed_time = start.elapsed_time(end) / 1000
+            else:
+                end_time = time.perf_counter()
+                elapsed_time = end_time - start_time
+            logger.info(f'Offsetting, scaling and padding took {elapsed_time:.3f} s')
 
         return self
 
@@ -337,9 +375,13 @@ class TensorPredictions:
         """
         if self.time:
             # Initialize timing calculations
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            if self.device.type == 'cuda':
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+            else:
+                import time
+                start_time = time.perf_counter()
             len_before = len(self)
 
         # Skip if there are no instances to remove
@@ -373,10 +415,15 @@ class TensorPredictions:
             nms_ind = []
         
         if self.time:
-            end.record()
-            torch.cuda.synchronize()
+            if self.device.type == 'cuda':
+                end.record()
+                torch.cuda.synchronize()
+                elapsed_time = start.elapsed_time(end) / 1000
+            else:
+                end_time = time.perf_counter()
+                elapsed_time = end_time - start_time
             logger.info(
-                f'Non-maximum suppression took {start.elapsed_time(end) / 1000:.3f}s '
+                f'Non-maximum suppression took {elapsed_time:.3f}s '
                 f'for removing {len_before - len(nms_ind)} elements of {len_before} elements'
             )
         return self
@@ -1142,13 +1189,17 @@ def _process_batch(
     ) -> Tuple[int, torch.Tensor, Tuple]:
     if time:
         # Initialize batch timing calculations
-        start_batch_event = torch.cuda.Event(enable_timing=True)
-        end_fetch_event = torch.cuda.Event(enable_timing=True)
-        end_forward_event = torch.cuda.Event(enable_timing=True)
-        end_batch_event = torch.cuda.Event(enable_timing=True)
-        current_device_stream = torch.cuda.current_stream(device=device)
-        # Record batch start
-        start_batch_event.record(current_device_stream)
+        if device.type == 'cuda':
+            start_batch_event = torch.cuda.Event(enable_timing=True)
+            end_fetch_event = torch.cuda.Event(enable_timing=True)
+            end_forward_event = torch.cuda.Event(enable_timing=True)
+            end_batch_event = torch.cuda.Event(enable_timing=True)
+            current_device_stream = torch.cuda.current_stream(device=device)
+            # Record batch start
+            start_batch_event.record(current_device_stream)
+        else:
+            import time as time_module
+            start_time = time_module.perf_counter()
     
     # Get the offsets for the current batch and extract and stack the corresponding tiles
     batch = torch.stack([
@@ -1157,21 +1208,31 @@ def _process_batch(
             ], dim=0)
     if time:
         # Record end of fetch
-        end_fetch_event.record(current_device_stream)
+        if device.type == 'cuda':
+            end_fetch_event.record(current_device_stream)
+        else:
+            fetch_end_time = time_module.perf_counter()
     # Forward pass the model on the batch tiles
     with torch.no_grad():
         batch_outputs = getattr(model, callback)(batch)
     if time:
         # Record end of forward
-        end_forward_event.record(current_device_stream)
-        # Record batch end
-        end_batch_event.record(current_device_stream)
-
-        # Calculate timing
-        torch.cuda.synchronize(device=device)
-        batch_time = start_batch_event.elapsed_time(end_batch_event) / 1000  # Convert to seconds
-        fetch_time = start_batch_event.elapsed_time(end_fetch_event) / 1000  # Convert to seconds
-        forward_time = end_fetch_event.elapsed_time(end_forward_event) / 1000  # Convert to seconds
+        if device.type == 'cuda':
+            end_forward_event.record(current_device_stream)
+        else:
+            forward_end_time = time_module.perf_counter()
+        # Record batch end and calculate timing
+        if device.type == 'cuda':
+            end_batch_event.record(current_device_stream)
+            torch.cuda.synchronize(device=device)
+            batch_time = start_batch_event.elapsed_time(end_batch_event) / 1000  # Convert to seconds
+            fetch_time = start_batch_event.elapsed_time(end_fetch_event) / 1000  # Convert to seconds
+            forward_time = end_fetch_event.elapsed_time(end_forward_event) / 1000  # Convert to seconds
+        else:
+            batch_end_time = time_module.perf_counter()
+            batch_time = batch_end_time - start_time
+            fetch_time = fetch_end_time - start_time 
+            forward_time = forward_end_time - fetch_end_time
         # loggger.info(
         #   f'Batch time: {batch_time:.3f}s,'
         #   f' fetch time: {fetch_time:.3f}s,'
@@ -1278,6 +1339,12 @@ class Predictor(object):
             dtype = getattr(torch, dtype)
         if dtype not in [torch.float16, torch.float32, torch.bfloat16]:
             raise ValueError(f"Dtype '{dtype}' is not supported.")
+        
+        # Force full precision for CPU inference as half-precision operations are not fully supported on CPU
+        if self._device.type == 'cpu' and dtype == torch.float16:
+            logger.warning(f"Half-precision (float16) not fully supported on CPU. Using float32 instead.")
+            dtype = torch.float32
+        
         self._dtype = dtype
 
         if isinstance(model, str):
@@ -1332,6 +1399,35 @@ class Predictor(object):
                 raise ValueError(f"Unknown hyperparameter: {k}")
         return self
     
+    def _create_timing_events(self):
+        """Create timing events compatible with the current device."""
+        if self._device.type == 'cuda':
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            return start, end
+        else:
+            import time
+            return None, None
+    
+    def _record_start_time(self, start_event):
+        """Record the start time for the current device."""
+        if self._device.type == 'cuda' and start_event is not None:
+            start_event.record()
+            return None
+        else:
+            import time
+            return time.perf_counter()
+    
+    def _calculate_elapsed_time(self, start_event, end_event, start_time):
+        """Calculate elapsed time for the current device."""
+        if self._device.type == 'cuda' and start_event is not None and end_event is not None:
+            end_event.record()
+            torch.cuda.synchronize()
+            return start_event.elapsed_time(end_event) / 1000  # Convert to seconds
+        else:
+            import time
+            return time.perf_counter() - start_time
+    
     def _detect_instances(
             self,
             image : torch.Tensor,
@@ -1348,10 +1444,8 @@ class Predictor(object):
 
         if self.TIME:
             # Initialize timing calculations
-            start_detect = torch.cuda.Event(enable_timing=True)
-            end_detect = torch.cuda.Event(enable_timing=True)
-            main_stream = torch.cuda.current_stream(device=self._device)
-            start_detect.record(main_stream)
+            start_detect, end_detect = self._create_timing_events()
+            start_time = self._record_start_time(start_detect)
         
         orig_h, orig_w = image.shape[1:]
         w, h = orig_w, orig_h
@@ -1400,9 +1494,9 @@ class Predictor(object):
 
         if self.TIME:
             # Initialize timing calculations
-            start_event, end_event = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            start_event, end_event = self._create_timing_events()
             batch_times, fetch_times, forward_times, postprocess_times = [], [], [], []
-            start_event.record(main_stream)
+            batch_start_time = self._record_start_time(start_event)
         
         postprocessed_results = [None for _ in range(len(offsets))]
         batches = 0
@@ -1417,9 +1511,8 @@ class Predictor(object):
 
                 batch, raw_results, timing = _process_batch(model=self._model, device=self._device, **batch_kwargs)
                 if self.TIME:
-                    postprocess_start = torch.cuda.Event(enable_timing=True)
-                    postprocess_end = torch.cuda.Event(enable_timing=True)
-                    postprocess_start.record(main_stream)
+                    postprocess_start, postprocess_end = self._create_timing_events()
+                    postprocess_start_time = self._record_start_time(postprocess_start)
                 this_postprocessed_results = postprocess(
                     raw_results,
                     imgs = batch,
@@ -1436,15 +1529,12 @@ class Predictor(object):
                     batch_times.append(timing[0])
                     fetch_times.append(timing[1])
                     forward_times.append(timing[2])
-                    postprocess_end.record(main_stream)
-                    torch.cuda.synchronize(device = self._device)
-                    postprocess_times.append(postprocess_start.elapsed_time(postprocess_end) / 1000)
+                    postprocess_time = self._calculate_elapsed_time(postprocess_start, postprocess_end, postprocess_start_time)
+                    postprocess_times.append(postprocess_time)
             
         if self.TIME:
             # Finish timing calculations
-            end_event.record(main_stream)
-            torch.cuda.synchronize(device = self._device)
-            total_elapsed = start_event.elapsed_time(end_event) / 1000  # Convert to seconds
+            total_elapsed = self._calculate_elapsed_time(start_event, end_event, batch_start_time)
             fetch_time, forward_time, postprocess_time = sum(fetch_times), sum(forward_times), sum(postprocess_times)
             total_batch_time = sum(batch_times) + postprocess_time
             overhead_prop = (total_elapsed - total_batch_time) / total_elapsed
@@ -1508,9 +1598,7 @@ class Predictor(object):
         #################
 
         if self.TIME:
-            end_detect.record(main_stream)
-            torch.cuda.synchronize(device=self._device)
-            total_detect_time = start_detect.elapsed_time(end_detect) / 1000  # Convert to seconds
+            total_detect_time = self._calculate_elapsed_time(start_detect, end_detect, start_time)
             pred_prop = total_elapsed / total_detect_time
             logger.info(
                 f'Prediction time: {total_elapsed:.3f}s/{pred_prop:>4.1%}'
@@ -1557,16 +1645,24 @@ class Predictor(object):
         """
         if self.TIME:
             # Initialize timing calculations
-            start_pyramid, end_pyramid = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-            start_pyramid.record()
+            start_pyramid, end_pyramid = self._create_timing_events()
+            start_time = self._record_start_time(start_pyramid)
 
         if isinstance(image, str):
             path : str = image
-            image : torch.Tensor = read_image(
-                path=image, 
-                mode=ImageReadMode.RGB, 
-                apply_exif_orientation=True
-            ).to(self._device)
+            # Try to use apply_exif_orientation if supported (torchvision >= 0.13)
+            try:
+                image : torch.Tensor = read_image(
+                    path=image, 
+                    mode=ImageReadMode.RGB, 
+                    apply_exif_orientation=True
+                ).to(self._device)
+            except TypeError:
+                # Fall back to older torchvision version without apply_exif_orientation
+                image : torch.Tensor = read_image(
+                    path=image, 
+                    mode=ImageReadMode.RGB
+                ).to(self._device)
         elif isinstance(image, torch.Tensor):
             logger.debug("Input image source file not specified for prediction, saving the prediction will require specifying the source file basename.")
         else:
@@ -1661,9 +1757,7 @@ class Predictor(object):
 
         if self.TIME:
             # Finish timing calculations
-            end_pyramid.record()
-            torch.cuda.synchronize()
-            total_pyramid_time = start_pyramid.elapsed_time(end_pyramid) / 1000
+            total_pyramid_time = self._calculate_elapsed_time(start_pyramid, end_pyramid, start_time)
             logger.info(
                 f'Total pyramid time: {total_pyramid_time:.3f}s'
                 f' ({self.total_detection_time / total_pyramid_time * 100:.3g}% detection |'

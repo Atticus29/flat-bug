@@ -203,3 +203,7 @@ pyvenv.cfg
 *.Rproj.user
 *.Rproj
 *.Rhistory
+
+# Input/Output directories
+img_dir/
+output_dir/
